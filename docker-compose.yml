@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: serviceflow_db
+    environment:
+      POSTGRES_DB: serviceflow
+      POSTGRES_USER: serviceflow
+      POSTGRES_PASSWORD: serviceflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U serviceflow -d serviceflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: serviceflow_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  createbuckets:
+    image: minio/mc:latest
+    container_name: serviceflow_minio_setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb -p local/serviceflow || true;
+      /usr/bin/mc anonymous set download local/serviceflow || true;
+      exit 0;
+      "
+
+  backend:
+    build:
+      context: ./backend
+    container_name: serviceflow_backend
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+psycopg2://serviceflow:serviceflow@db:5432/serviceflow
+      JWT_SECRET: change_me_super_secret
+      JWT_EXPIRE_MIN: 1440
+      STORAGE_BACKEND: s3
+      S3_BUCKET: serviceflow
+      S3_REGION: us-east-1
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_USE_PATH_STYLE: "true"
+      UPLOAD_DIR: /app/storage/uploads
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads:/app/storage/uploads
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: serviceflow_frontend
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8000/api/v1
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  minio:
+  uploads:
